@@ -3,10 +3,10 @@
 # Toolchains
 ##############################################
 # Toolchain root directory
-TD=~/android/toolchains
+TD=/mnt/sources/android/toolchains
 
 # Preferred editor
-EDIT=vi
+EDIT=nano
 
 # Architecture
 export ARCH=arm64
