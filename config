@@ -61,6 +61,9 @@ CONFIG=nethunter_defconfig
 SRC_VERSION=
 TARGET_VERSION=
 
+# Fake version for GKI >=5.4
+TARGET_FAKE_VERSION=
+
 # Directory structure on the target device that will contain the modules directory
 MODULE_DIRTREE="modules/system_root/"
 

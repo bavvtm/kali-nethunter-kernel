@@ -452,6 +452,88 @@ function copy_version() {
 	return 0
 }
 
+function read_original_version() {
+	local makefile=${KDIR}/Makefile
+	printf "\n"
+	ORIG_VERSION=$(grep -E "^VERSION\s*=" "$makefile" | head -1 | grep -oE '[0-9]+')
+	ORIG_PATCHLEVEL=$(grep -E "^PATCHLEVEL\s*=" "$makefile" | head -1 | grep -oE '[0-9]+')
+	ORIG_SUBLEVEL=$(grep -E "^SUBLEVEL\s*=" "$makefile" | head -1 | grep -oE '[0-9]+')
+	info "Original kernel: $ORIG_VERSION.$ORIG_PATCHLEVEL.$ORIG_SUBLEVEL"
+}
+
+function detect_kernel_version() {
+	local makefile=${KDIR}/Makefile
+	local ret=1
+	printf "\n"
+  if [ "${ORIG_VERSION}" -gt 5 ] || ([ "${ORIG_VERSION}" -eq 5 ] && [ "${ORIG_PATCHLEVEL}" -ge 4 ]); then
+		info "Kernel >= 5.4 detected"
+    ret=0
+  fi
+	return $ret
+}
+
+function patch_makefile_version() {
+	local makefile=${KDIR}/Makefile
+	local ret=1
+	printf "\n"
+	local tversion=$(echo "${TARGET_FAKE_VERSION}" | cut -d'.' -f1)
+	local tpatchlevel=$(echo "${TARGET_FAKE_VERSION}" | cut -d'.' -f2)
+	local tsublevel=$(echo "${TARGET_FAKE_VERSION}" | cut -d'.' -f3)
+	if [ "${ORIG_VERSION}.${ORIG_PATCHLEVEL}" != "${tversion}.${tpatchlevel}" ]; then
+		info "Patching Makefile to version: $TARGET_FAKE_VERSION"
+		cp "${makefile}" "${makefile}.bak"
+		ORI_LINE='^KERNELVERSION = $(VERSION)$(if $(PATCHLEVEL),.$(PATCHLEVEL)$(if $(SUBLEVEL),.$(SUBLEVEL)))$(EXTRAVERSION)'
+		NEW_LINE="KERNELVERSION = ${tversion}\$(if ${tpatchlevel},.${tpatchlevel}\$(if ${tsublevel},.${tsublevel}))\$(EXTRAVERSION)"
+		sed -i "s|${ORI_LINE}|${NEW_LINE}|" ${makefile}
+		success "Makefile patched to version: ${TARGET_FAKE_VERSION}"
+		ret=0
+	fi
+	return $ret
+}
+
+function generate_gki_version() {
+	local tminor=$(echo "${TARGET_FAKE_VERSION}" | cut -d'.' -f1,2)
+  local fetchmode="remote"
+	local aospbranch
+	local configpath
+	local rawconfig
+	printf "\n"
+  case "${tminor}" in
+    "5.4")  fetchmode="local"; configpath="build.config.common" ;;
+    "5.10") aospbranch="android12-5.10"; configpath="build.config.common" ;;
+    "5.15") aospbranch="android13-5.15"; configpath="build.config.common" ;;
+    "6.1")  aospbranch="android14-6.1";  configpath="build.config.common" ;;
+    "6.6")  aospbranch="android15-6.6";  configpath="build.config.common" ;;
+    "6.12") aospbranch="android16-6.12"; configpath="build.config.constants" ;;
+    "6.18") aospbranch="android17-6.18"; configpath="bazel/constants.scl" ;;
+    *)
+			info "Unknown version, fetching latest AOSP branch"
+      aospbranch=$(git ls-remote --heads https://android.googlesource.com/kernel/common | grep -o "refs/heads/android[0-9]\{2\}-[0-9]\.[0-9]\{1,2\}" | tail -n 1 | cut -d'/' -f3)
+      configpath="build.config.common"
+      ;;
+  esac
+	if [ "${fetchmode}" = "local" ]; then
+		info "Loading local config: ${configpath}"
+		rawconfig=$(cat "${KDIR}/${configpath}")
+    aospbranch=$(echo "${rawconfig}" | grep -E "^BRANCH=" | cut -d= -f2 | tr -d ' "')
+	else
+		info "Fetching remote config for ${aospbranch}"
+		rawconfig=$(curl -s --connect-timeout 5 -m 10 "https://raw.githubusercontent.com/aosp-mirror/kernel_common/${aospbranch}/${configpath}")
+	fi
+	local kmigen=$(echo "${rawconfig}" | grep -E "KMI_GENERATION" | tail -n 1 | grep -oE "[0-9]+")
+	kmigen=${kmigen:-1}
+	local androidrelease=$(echo "${aospbranch}" | sed -E 's/^(android[0-9]+)-.*/\1/')
+	local gitsha=$(git rev-parse --verify HEAD 2>/dev/null | cut -c1-12)
+	local gitsuffix="${gitsha:+-g${gitsha}}"
+	local abnum="-abogki$(date +%s | cut -c4-10)"
+	local fakelocalversion="-${androidrelease}-${kmigen}${gitsuffix}${abnum}"
+	fakelocalversion=$(echo "${fakelocalversion}" | sed 's/--*/-/g')
+	export KMI_GENERATION=$kmigen
+	info "Injecting LOCALVERSION: ${fakelocalversion}"
+	sed -i "s/CONFIG_LOCALVERSION=\".*\"/CONFIG_LOCALVERSION=\"${fakelocalversion}\"/" ${KERNEL_OUT}/.config
+	success "Injected LOCALVERSION: ${fakelocalversion}"
+}
+
 function apply_patch() {
 	local ret=1
 	printf "\n"
@@ -593,6 +675,11 @@ function make_kernel() {
 	info " Building kernel"
 	info "~~~~~~~~~~~~~~~~~~"
 	copy_version
+	read_original_version
+	if detect_kernel_version && [ -n "${TARGET_FAKE_VERSION}" ]; then
+		patch_makefile_version
+		generate_gki_version
+	fi
 	grep "CONFIG_MODULES=y" ${KERNEL_OUT}/.config >/dev/null && MODULES=true
 	## Some kernel sources do not compile into a separate $OUT directory so we set $OUT = $ KDIR
 	## This works with clean and config targets but not for a build, we'll catch this here
@@ -883,6 +970,10 @@ read_choice(){
                    print_help
                    ;;
 		e)
+			 rm -rf "${ANYKERNEL_DIR}/${IMAGE_NAME}"
+			 if [ -f ${KDIR}/Makefile.bak  ]; then
+			   cp -f ${KDIR}/Makefile.bak ${KDIR}/Makefile & rm -rf ${KDIR}/Makefile.bak
+			 fi
 		   printf "${restore}\n\n"
 	 	   exit 0
 		   ;;
